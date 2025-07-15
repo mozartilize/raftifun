@@ -1,5 +1,5 @@
 #[derive(Debug)]
 pub enum MembershipChange {
-    AddNode(u64),
+    AddNode { id: u64, address: String },
     RemoveNode(u64),
 }
