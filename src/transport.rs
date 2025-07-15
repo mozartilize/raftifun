@@ -1,17 +1,28 @@
 use tonic::{Request, Response, Status};
 use prost::Message;
-use raft::eraftpb::Message as RaftProtoMessage;
+use raft::{eraftpb::Message as RaftProtoMessage};
 
 pub mod raftio {
     tonic::include_proto!("raftio");
 }
 
-use raftio::raft_transport_server::{RaftTransport};
+use raftio::raft_transport_server::RaftTransport;
 pub use raftio::raft_transport_server::RaftTransportServer;
-use raftio::RaftMessage;
+use raftio::{RaftMessage, JoinRequest, JoinResponse, LeaveRequest, LeaveResponse};
 
-#[derive(Debug, Default)]
-pub struct RaftService;
+use tokio::sync::mpsc::Sender;
+use crate::membership::MembershipChange;
+
+pub struct RaftService {
+    pub tx: Sender<MembershipChange>,
+    // pub node: Arc<Mutex<RawNode<MemStorage>>>,
+}
+
+impl RaftService {
+    pub fn new(tx: Sender<MembershipChange>) -> Self {
+        Self { tx }
+    }
+}
 
 #[tonic::async_trait]
 impl RaftTransport for RaftService {
@@ -29,5 +40,29 @@ impl RaftTransport for RaftService {
         }
 
         Ok(Response::new(RaftMessage { data: vec![] }))
+    }
+
+    async fn join(
+        &self,
+        request: Request<JoinRequest>,
+    ) -> Result<Response<JoinResponse>, Status> {
+        let jr = request.into_inner();
+        println!("Join request for node {}", jr.id);
+        if let Err(e) = self.tx.send(MembershipChange::AddNode(jr.id)).await {
+            eprintln!("Failed to forward join request: {e}");
+        }
+        Ok(Response::new(JoinResponse {}))
+    }
+
+    async fn leave(
+        &self,
+        request: Request<LeaveRequest>,
+    ) -> Result<Response<LeaveResponse>, Status> {
+        let lr = request.into_inner();
+        println!("Leave request for node {}", lr.id);
+        if let Err(e) = self.tx.send(MembershipChange::RemoveNode(lr.id)).await {
+            eprintln!("Failed to forward leave request: {e}");
+        }
+        Ok(Response::new(LeaveResponse {}))
     }
 }

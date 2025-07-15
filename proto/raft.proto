@@ -6,6 +6,21 @@ message RaftMessage {
   bytes data = 1;
 }
 
+message JoinRequest {
+  uint64 id = 1;
+  string address = 2;
+}
+
+message JoinResponse {}
+
+message LeaveRequest {
+  uint64 id = 1;
+}
+
+message LeaveResponse {}
+
 service RaftTransport {
   rpc SendMessage(RaftMessage) returns (RaftMessage);
+  rpc Join(JoinRequest) returns (JoinResponse);
+  rpc Leave(LeaveRequest) returns (LeaveResponse);
 }
