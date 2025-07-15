@@ -1,0 +1,19 @@
+[package]
+name = "scylla-cdc-raft-consumers"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+prost = "0.11"
+raft = { version = "0.7", default-features = false, features = ["prost-codec", "default-logger"] }
+tokio = { version = "1.38", features = ["macros", "rt-multi-thread"] }
+tonic = { version = "0.9", features = ["transport"] }
+uuid = { version = "1", features = ["v4"] }
+slog = "2.7"
+slog-async = "2.8"
+slog-term = "2.9"
+
+[build-dependencies]
+tonic-build = "0.9"

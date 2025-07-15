@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package raftio;
+
+message RaftMessage {
+  bytes data = 1;
+}
+
+service RaftTransport {
+  rpc SendMessage(RaftMessage) returns (RaftMessage);
+}
