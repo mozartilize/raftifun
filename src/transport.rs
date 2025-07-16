@@ -1,6 +1,7 @@
 use prost::Message;
 use raft::eraftpb::Message as RaftProtoMessage;
 use tonic::{Request, Response, Status};
+use std::net::SocketAddr;
 
 pub mod raftio {
     tonic::include_proto!("raftio");
@@ -31,12 +32,16 @@ impl RaftTransport for RaftService {
         &self,
         request: Request<RaftMessage>,
     ) -> Result<Response<RaftMessage>, Status> {
+        let remote = request
+            .metadata()
+            .get("x-raft-from")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<SocketAddr>().ok());
         let msg = request.into_inner();
-        println!("Received RaftMessage: {} bytes", msg.data.len());
 
         match RaftProtoMessage::decode(&*msg.data) {
             Ok(parsed) => {
-                if let Err(e) = self.tx.send(Event::Raft(parsed)).await {
+                if let Err(e) = self.tx.send(Event::Raft(parsed, remote)).await {
                     eprintln!("Failed to forward raft message: {e}");
                 }
             }

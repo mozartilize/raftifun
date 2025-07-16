@@ -1080,6 +1080,7 @@ dependencies = [
  "slog-async",
  "slog-term",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-build",
  "uuid",
