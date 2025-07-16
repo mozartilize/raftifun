@@ -120,9 +120,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut peer_addresses: HashMap<u64, String> = HashMap::new();
-    if let Some(join) = args.join {
-        peer_addresses.insert(1, join.to_string());
-    }
 
     let mut node = RawNode::new(&config, storage, &logger).unwrap();
 
@@ -152,14 +149,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut _voters: Vec<u64> = node.raft.prs().conf().voters().ids().iter().collect();
             _voters.sort_unstable();
             let _leader_id = node.raft.leader_id;
-            println!(
-                "[cluster state] voters: {:?}, leader: {} (me: {})",
-                _voters, _leader_id, node.raft.id
-            );
-            println!(
-                "[progress] applied: {}, committed: {}",
-                node.raft.raft_log.applied, node.raft.raft_log.committed
-            );
+            // println!(
+            //     "[cluster state] voters: {:?}, leader: {} (me: {})",
+            //     _voters, _leader_id, node.raft.id
+            // );
+            // println!(
+            //     "[progress] applied: {}, committed: {}",
+            //     node.raft.raft_log.applied, node.raft.raft_log.committed
+            // );
         }
 
         while let Ok(change) = rx.try_recv() {
@@ -191,6 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 Event::Raft(msg) => {
+                    println!("receive a message {:?}", msg.msg_type());
                     if let Err(e) = node.step(msg) {
                         eprintln!("Error stepping raft message: {e}");
                     }
@@ -209,56 +207,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         last_role = current_role;
 
-        if node.has_ready() {
-            let mut rd = node.ready();
+        let mut rd = node.ready();
 
-            if !rd.snapshot().is_empty() {
-                node.mut_store()
-                    .wl()
-                    .apply_snapshot(rd.snapshot().clone())?;
-            }
-
-            if !rd.entries().is_empty() {
-                node.mut_store().wl().append(rd.entries())?;
-            }
-
-            if let Some(hs) = rd.hs() {
-                node.mut_store().wl().set_hardstate(hs.clone());
-            }
-
-            for msg in rd.take_messages() {
-                if let Some(addr) = peer_addresses.get(&msg.to) {
-                    if let Ok(mut client) =
-                        RaftTransportClient::connect(format!("http://{}", addr)).await
-                    {
-                        let mut data = Vec::new();
-                        msg.encode(&mut data).unwrap();
-                        let raft_msg = transport::raftio::RaftMessage { data };
-                        let _ = client.send_message(raft_msg).await;
-                    }
-                }
-            }
-
-            handle_committed_entries(&mut node, &mut state, rd.take_committed_entries());
-
-            let mut light_rd = node.advance(rd);
-
-            for msg in light_rd.take_messages() {
-                if let Some(addr) = peer_addresses.get(&msg.to) {
-                    if let Ok(mut client) =
-                        RaftTransportClient::connect(format!("http://{}", addr)).await
-                    {
-                        let mut data = Vec::new();
-                        msg.encode(&mut data).unwrap();
-                        let raft_msg = transport::raftio::RaftMessage { data };
-                        let _ = client.send_message(raft_msg).await;
-                    }
-                }
-            }
-
-            handle_committed_entries(&mut node, &mut state, light_rd.take_committed_entries());
-
-            node.advance_apply();
+        if !rd.snapshot().is_empty() {
+            node.mut_store()
+                .wl()
+                .apply_snapshot(rd.snapshot().clone())?;
         }
+
+        if !rd.entries().is_empty() {
+            node.mut_store().wl().append(rd.entries())?;
+        }
+
+        if let Some(hs) = rd.hs() {
+            node.mut_store().wl().set_hardstate(hs.clone());
+        }
+
+        for msg in rd.take_messages() {
+            if let Some(addr) = peer_addresses.get(&msg.to) {
+                println!("sending message to peer {}, {:?}", addr, msg.msg_type());
+                if let Ok(mut client) =
+                    RaftTransportClient::connect(format!("http://{}", addr)).await
+                {
+                    let mut data = Vec::new();
+                    msg.encode(&mut data).unwrap();
+                    let raft_msg = transport::raftio::RaftMessage { data };
+                    let result = client.send_message(raft_msg).await;
+                    println!("{:?}", result.err());
+                }
+                else {
+                    eprintln!("cant connect to {}", addr);
+                }
+            }
+        }
+
+        handle_committed_entries(&mut node, &mut state, rd.take_committed_entries());
+
+        let mut light_rd = node.advance(rd);
+
+        for msg in light_rd.take_messages() {
+            if let Some(addr) = peer_addresses.get(&msg.to) {
+                println!("sending light message to peer {}, {:?}", addr, msg.msg_type());
+                if let Ok(mut client) =
+                    RaftTransportClient::connect(format!("http://{}", addr)).await
+                {
+                    let mut data = Vec::new();
+                    msg.encode(&mut data).unwrap();
+                    let raft_msg = transport::raftio::RaftMessage { data };
+                    let result = client.send_message(raft_msg).await;
+                    println!("{:?}", result.err());
+                }
+            }
+        }
+
+        handle_committed_entries(&mut node, &mut state, light_rd.take_committed_entries());
+
+        node.advance_apply();
     }
 }
