@@ -11,7 +11,9 @@ message JoinRequest {
   string address = 2;
 }
 
-message JoinResponse {}
+message JoinResponse {
+  bytes conf_state = 1;
+}
 
 message LeaveRequest {
   uint64 id = 1;

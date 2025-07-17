@@ -98,28 +98,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Bind the listener first so we know the port is reserved
     let listener = TcpListener::bind(listen).await.expect("bind failed");
     let addr = listener.local_addr().expect("listener addr");
-    let (ready_tx, ready_rx) = oneshot::channel();
-
-    // Spawn the gRPC server and signal once it starts serving
-    spawn(async move {
-        ready_tx.send(()).ok();
-        Server::builder()
-            .add_service(RaftTransportServer::new(RaftService::new(server_tx)))
-            .serve_with_incoming(TcpListenerStream::new(listener))
-            .await
-            .unwrap();
-    });
-
-    // Wait for the server task to report readiness
-    ready_rx.await.expect("server failed to start");
-
-    // Ensure the server is actually accepting connections before continuing
-    loop {
-        match TcpStream::connect(addr).await {
-            Ok(_) => break,
-            Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
-        }
-    }
 
     let config = Config {
         id,
@@ -138,17 +116,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let storage: MemStorage;
 
-
     if let Some(join) = args.join {
         let mut client = RaftTransportClient::connect(format!("http://{}", join)).await?;
         let req = transport::raftio::JoinRequest {
             id,
             address: listen.to_string(),
         };
-        let _ = client.join(req).await?;
-        storage = MemStorage::new_with_conf_state((vec![], vec![]));
+        let resp = client.join(req).await?.into_inner();
+        let cs = raft::prelude::ConfState::decode(resp.conf_state.as_ref())?;
+        storage = MemStorage::new_with_conf_state((cs.voters, cs.learners));
     } else {
         storage = MemStorage::new_with_conf_state((vec![id], vec![]));
+    }
+
+    let service_storage = storage.clone();
+    let (ready_tx, ready_rx) = oneshot::channel();
+
+    // Spawn the gRPC server and signal once it starts serving
+    spawn(async move {
+        ready_tx.send(()).ok();
+        Server::builder()
+            .add_service(RaftTransportServer::new(RaftService::new(server_tx, service_storage)))
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await
+            .unwrap();
+    });
+
+    // Wait for the server task to report readiness
+    ready_rx.await.expect("server failed to start");
+
+    // Ensure the server is actually accepting connections before continuing
+    loop {
+        match TcpStream::connect(addr).await {
+            Ok(_) => break,
+            Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+        }
     }
 
     let mut peer_addresses: HashMap<u64, String> = HashMap::new();

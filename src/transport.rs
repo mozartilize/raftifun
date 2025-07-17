@@ -10,6 +10,8 @@ pub mod raftio {
 use raftio::raft_transport_server::RaftTransport;
 pub use raftio::raft_transport_server::RaftTransportServer;
 use raftio::{JoinRequest, JoinResponse, LeaveRequest, LeaveResponse, RaftMessage};
+use raft::storage::MemStorage;
+use raft::Storage;
 
 use crate::events::Event;
 use crate::membership::MembershipChange;
@@ -17,12 +19,13 @@ use tokio::sync::mpsc::Sender;
 
 pub struct RaftService {
     pub tx: Sender<Event>,
+    pub storage: MemStorage,
     // pub node: Arc<Mutex<RawNode<MemStorage>>>,
 }
 
 impl RaftService {
-    pub fn new(tx: Sender<Event>) -> Self {
-        Self { tx }
+    pub fn new(tx: Sender<Event>, storage: MemStorage) -> Self {
+        Self { tx, storage }
     }
 }
 
@@ -64,7 +67,13 @@ impl RaftTransport for RaftService {
         {
             eprintln!("Failed to forward join request: {e}");
         }
-        Ok(Response::new(JoinResponse {}))
+        let state = self
+            .storage
+            .initial_state()
+            .map_err(|e| Status::internal(format!("failed to get conf state: {e}")))?;
+        let mut data = Vec::new();
+        state.conf_state.encode(&mut data).unwrap();
+        Ok(Response::new(JoinResponse { conf_state: data }))
     }
 
     async fn leave(
