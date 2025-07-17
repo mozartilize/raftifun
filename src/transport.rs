@@ -67,12 +67,12 @@ impl RaftTransport for RaftService {
         {
             eprintln!("Failed to forward join request: {e}");
         }
-        let state = self
+        let snap = self
             .storage
-            .initial_state()
-            .map_err(|e| Status::internal(format!("failed to get conf state: {e}")))?;
+            .snapshot(0, jr.id)
+            .map_err(|e| Status::internal(format!("failed to get snapshot: {e}")))?;
         let mut data = Vec::new();
-        state.conf_state.encode(&mut data).unwrap();
+        snap.get_metadata().get_conf_state().encode(&mut data).unwrap();
         Ok(Response::new(JoinResponse { conf_state: data }))
     }
 
