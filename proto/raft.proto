@@ -11,7 +11,12 @@ message JoinRequest {
   string address = 2;
 }
 
-message JoinResponse {}
+message JoinResponse {
+  repeated uint64 voters = 1;
+  repeated uint64 learners = 2;
+  map<uint64, string> peer_addresses = 3;
+  bytes snapshot = 4;
+}
 
 message LeaveRequest {
   uint64 id = 1;
