@@ -13,15 +13,26 @@ use raftio::{JoinRequest, JoinResponse, LeaveRequest, LeaveResponse, RaftMessage
 
 use crate::events::Event;
 use crate::membership::MembershipChange;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::{mpsc::Sender, RwLock};
+use std::sync::Arc;
+use std::collections::HashMap;
+
+#[derive(Default, Clone)]
+pub struct ClusterInfo {
+    pub voters: Vec<u64>,
+    pub learners: Vec<u64>,
+    pub peer_addresses: HashMap<u64, String>,
+    pub snapshot: Vec<u8>,
+}
 
 pub struct RaftService {
     pub tx: Sender<Event>,
+    pub cluster_info: Arc<RwLock<ClusterInfo>>, 
 }
 
 impl RaftService {
-    pub fn new(tx: Sender<Event>) -> Self {
-        Self { tx }
+    pub fn new(tx: Sender<Event>, cluster_info: Arc<RwLock<ClusterInfo>>) -> Self {
+        Self { tx, cluster_info }
     }
 }
 
@@ -63,7 +74,14 @@ impl RaftTransport for RaftService {
         {
             eprintln!("Failed to forward join request: {e}");
         }
-        Ok(Response::new(JoinResponse { }))
+
+        let info = self.cluster_info.read().await;
+        Ok(Response::new(JoinResponse {
+            voters: info.voters.clone(),
+            learners: info.learners.clone(),
+            peer_addresses: info.peer_addresses.clone(),
+            snapshot: info.snapshot.clone(),
+        }))
     }
 
     async fn leave(

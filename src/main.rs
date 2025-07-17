@@ -9,17 +9,19 @@ use events::Event;
 use membership::MembershipChange;
 use prost::Message;
 use raft::prelude::{ConfChangeSingle, ConfChangeType, ConfChangeV2, MessageType};
-use raft::{storage::MemStorage, Config, RawNode};
+use raft::{storage::MemStorage, Config, RawNode, Storage};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::spawn;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{metadata::MetadataValue, transport::Server, Request};
 use transport::{
-    raftio::raft_transport_client::RaftTransportClient, RaftService, RaftTransportServer,
+    raftio::raft_transport_client::RaftTransportClient, ClusterInfo, RaftService,
+    RaftTransportServer,
 };
 use uuid::Uuid;
 
@@ -94,6 +96,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (tx, mut rx) = mpsc::channel::<Event>(16);
     let server_tx = tx.clone();
+    let cluster_info = Arc::new(RwLock::new(ClusterInfo::default()));
+    let service_info = cluster_info.clone();
 
     // Bind the listener first so we know the port is reserved
     let listener = TcpListener::bind(listen).await.expect("bind failed");
@@ -103,7 +107,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn(async move {
         ready_tx.send(()).ok();
         Server::builder()
-            .add_service(RaftTransportServer::new(RaftService::new(server_tx)))
+            .add_service(RaftTransportServer::new(RaftService::new(
+                server_tx,
+                service_info,
+            )))
             .serve_with_incoming(TcpListenerStream::new(listener))
             .await
             .unwrap();
@@ -122,14 +129,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use slog::{Drain, Logger};
 
     let decorator = slog_term::TermDecorator::new().build();
-    let drain = slog_term::CompactFormat::new(decorator).build().fuse();
-    let drain = slog::LevelFilter::new(drain, slog::Level::Info).fuse();
+    let drain = slog_term::FullFormat::new(decorator)
+        .use_file_location()
+        .build()
+        .fuse();
+    let drain = slog::LevelFilter::new(drain, slog::Level::Debug).fuse();
     let drain = slog_async::Async::new(drain).build().fuse();
     let logger = Logger::root(drain, slog::o!());
 
     let storage: MemStorage;
 
     let mut peer_addresses: HashMap<u64, String> = HashMap::new();
+    peer_addresses.insert(id, listen.to_string());
+    {
+        let mut info = cluster_info.write().await;
+        info.peer_addresses.insert(id, listen.to_string());
+    }
 
     if let Some(join) = args.join {
         let mut client = RaftTransportClient::connect(format!("http://{}", join)).await?;
@@ -137,19 +152,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             id,
             address: listen.to_string(),
         };
-        let _ = client.join(req).await;
-        storage = MemStorage::new_with_conf_state((vec![], vec![]));
+        if let Ok(resp) = client.join(req).await {
+            let resp = resp.into_inner();
+            for (id, addr) in resp.peer_addresses {
+                peer_addresses.insert(id, addr);
+            }
+            storage = MemStorage::new_with_conf_state((resp.voters, resp.learners));
+            if !resp.snapshot.is_empty() {
+                if let Ok(snapshot) = raft::eraftpb::Snapshot::decode(&*resp.snapshot) {
+                    println!("apply_snapshot {:?}", snapshot);
+                    storage.wl().apply_snapshot(snapshot)?;
+                }
+            }
+        } else {
+            storage = MemStorage::new_with_conf_state((vec![], vec![]));
+        }
     } else {
         storage = MemStorage::new_with_conf_state((vec![id], vec![]));
     }
 
     let mut node = RawNode::new(&config, storage, &logger).unwrap();
+    {
+        let mut info = cluster_info.write().await;
+        info.voters = node.raft.prs().conf().voters().ids().iter().collect();
+        info.learners = node.raft.prs().conf().learners().iter().cloned().collect();
+        info.peer_addresses = peer_addresses.clone();
+        let applied = node.raft.raft_log.applied;
+        if let Ok(mut snap) = node.mut_store().snapshot(applied, id) {
+            let term = node.mut_store().term(applied).unwrap();
+            snap.mut_metadata().term = term;
+            info.snapshot = snap.encode_to_vec();
+        }
+    }
 
     let mut state = CoordinatorState::default();
     state.all_stream_ids = (0..16).map(|_| Uuid::new_v4().to_string()).collect();
-    
+
     let mut last_tick = Instant::now();
-    
+
     loop {
         if last_tick.elapsed() >= Duration::from_millis(100) {
             node.tick();
@@ -158,30 +198,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Log current voters and leader each tick
             let mut _voters: Vec<u64> = node.raft.prs().conf().voters().ids().iter().collect();
             _voters.sort_unstable();
+            let mut _learners: Vec<u64> =
+                node.raft.prs().conf().learners().iter().cloned().collect();
+            _learners.sort_unstable();
             let _leader_id = node.raft.leader_id;
             println!(
-                "[cluster state] voters: {:?}, leader: {} (me: {})",
-                _voters, _leader_id, node.raft.id
+                "[cluster state] voters: {:?}, learners: {:?}, leader: {} (me: {})",
+                _voters, _learners, _leader_id, node.raft.id
             );
             println!(
                 "[progress] applied: {}, committed: {}, term: {}",
                 node.raft.raft_log.applied, node.raft.raft_log.committed, node.raft.term
             );
+            {
+                let mut info = cluster_info.write().await;
+                info.voters = _voters.clone();
+                info.learners = _learners.clone();
+                info.peer_addresses = peer_addresses.clone();
+                let applied = node.raft.raft_log.applied;
+                if let Ok(mut snap) = node.mut_store().snapshot(applied, id) {
+                    let term = node.mut_store().term(applied).unwrap();
+                    snap.mut_metadata().term = term;
+                    info.snapshot = snap.encode_to_vec();
+                }
+            }
         }
 
         while let Ok(change) = rx.try_recv() {
             match change {
                 Event::Membership(MembershipChange::AddNode { id: nid, address }) => {
                     peer_addresses.insert(nid, address.clone());
+                    // When a node joins, add it as a learner first so that it
+                    // can catch up before voting.
                     let cc = ConfChangeV2 {
                         changes: vec![ConfChangeSingle {
                             node_id: nid,
-                            change_type: ConfChangeType::AddNode.into(),
+                            change_type: ConfChangeType::AddLearnerNode.into(),
                         }],
                         ..Default::default()
                     };
                     if let Err(e) = node.propose_conf_change(vec![], cc) {
-                        eprintln!("Failed to propose add node: {e}");
+                        eprintln!("Failed to propose add learner node: {e}");
                     }
                 }
                 Event::Membership(MembershipChange::RemoveNode(nid)) => {
@@ -200,6 +257,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Raft(msg, addr) => {
                     if msg.msg_type() != MessageType::MsgHeartbeat {
                         println!("receive a message {:?}", msg.msg_type());
+                        // Log current voters and leader each tick
+                        let mut _voters: Vec<u64> = node.raft.prs().conf().voters().ids().iter().collect();
+                        _voters.sort_unstable();
+                        let mut _learners: Vec<u64> =
+                            node.raft.prs().conf().learners().iter().cloned().collect();
+                        _learners.sort_unstable();
+                        let _leader_id = node.raft.leader_id;
+                        println!(
+                            "[cluster state] voters: {:?}, learners: {:?}, leader: {} (me: {})",
+                            _voters, _learners, _leader_id, node.raft.id
+                        );
+                        println!(
+                            "[progress] applied: {}, committed: {}, term: {}",
+                            node.raft.raft_log.applied, node.raft.raft_log.committed, node.raft.term
+                        );
                     }
                     if let Some(a) = addr {
                         peer_addresses.entry(msg.from).or_insert(a.to_string());
@@ -211,12 +283,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        if !node.has_ready() {
+            // println!("node {id} not ready");
+            continue;
+        }
+        
         let mut rd = node.ready();
-
+        
         if !rd.snapshot().is_empty() {
             node.mut_store()
                 .wl()
                 .apply_snapshot(rd.snapshot().clone())?;
+            {
+                let mut info = cluster_info.write().await;
+                info.snapshot = rd.snapshot().encode_to_vec();
+            }
         }
 
         if !rd.entries().is_empty() {
@@ -228,11 +309,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         for msg in rd.take_messages() {
-            println!("hello?");
+            // println!("hello?");
             if let Some(addr) = peer_addresses.get(&msg.to) {
-                if msg.msg_type() != MessageType::MsgHeartbeat {
-                    println!("sending message to peer {}, {:?}", addr, msg.msg_type());
-                }
+                // if msg.msg_type() != MessageType::MsgHeartbeat {
+                //     println!("sending message to peer {}, {:?}", addr, msg.msg_type());
+                // }
                 if let Ok(mut client) =
                     RaftTransportClient::connect(format!("http://{}", addr)).await
                 {
@@ -245,7 +326,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         MetadataValue::try_from(listen.to_string()).unwrap(),
                     );
                     let result = client.send_message(req).await;
-                    println!("{:?}", result.err());
+                    // println!("{:?}", result.err());
                 } else {
                     eprintln!("cant connect to {}", addr);
                 }
@@ -257,15 +338,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut light_rd = node.advance(rd);
 
         for msg in light_rd.take_messages() {
-            println!("hi?");
+            // println!("hi?");
             if let Some(addr) = peer_addresses.get(&msg.to) {
-                if msg.msg_type() != MessageType::MsgHeartbeat {
-                    println!(
-                        "sending light message to peer {}, {:?}",
-                        addr,
-                        msg.msg_type()
-                    );
-                }
+                // if msg.msg_type() != MessageType::MsgHeartbeat {
+                //     println!(
+                //         "sending light message to peer {}, {:?}",
+                //         addr,
+                //         msg.msg_type()
+                //     );
+                // }
                 if let Ok(mut client) =
                     RaftTransportClient::connect(format!("http://{}", addr)).await
                 {
@@ -278,7 +359,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         MetadataValue::try_from(listen.to_string()).unwrap(),
                     );
                     let result = client.send_message(req).await;
-                    println!("{:?}", result.err());
+                    // println!("{:?}", result.err());
                 }
             }
         }
