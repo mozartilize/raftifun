@@ -9,6 +9,7 @@ use events::Event;
 use membership::MembershipChange;
 use prost::Message;
 use raft::prelude::{ConfChangeSingle, ConfChangeType, ConfChangeV2, MessageType};
+use raft::StateRole;
 use raft::{storage::MemStorage, Config, RawNode, Storage};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -61,6 +62,9 @@ fn handle_committed_entries(
                     if let Ok(cs) = node.apply_conf_change(&cc) {
                         node.mut_store().wl().set_conf_state(cs);
                     }
+                }
+                for (node_id, prs) in node.raft.prs().iter() {
+                    println!("post apply {node_id} {:?}", prs);
                 }
             }
             _ => {
@@ -133,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .use_file_location()
         .build()
         .fuse();
-    let drain = slog::LevelFilter::new(drain, slog::Level::Debug).fuse();
+    let drain = slog::LevelFilter::new(drain, slog::Level::Info).fuse();
     let drain = slog_async::Async::new(drain).build().fuse();
     let logger = Logger::root(drain, slog::o!());
 
@@ -202,14 +206,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 node.raft.prs().conf().learners().iter().cloned().collect();
             _learners.sort_unstable();
             let _leader_id = node.raft.leader_id;
-            println!(
-                "[cluster state] voters: {:?}, learners: {:?}, leader: {} (me: {})",
-                _voters, _learners, _leader_id, node.raft.id
-            );
-            println!(
-                "[progress] applied: {}, committed: {}, term: {}",
-                node.raft.raft_log.applied, node.raft.raft_log.committed, node.raft.term
-            );
+            // println!(
+            //     "[cluster state] voters: {:?}, learners: {:?}, leader: {} (me: {})",
+            //     _voters, _learners, _leader_id, node.raft.id
+            // );
+            // println!(
+            //     "[progress] applied: {}, committed: {}, term: {}",
+            //     node.raft.raft_log.applied, node.raft.raft_log.committed, node.raft.term
+            // );
             {
                 let mut info = cluster_info.write().await;
                 info.voters = _voters.clone();
@@ -283,8 +287,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        if node.raft.state != StateRole::Leader && node.raft.msgs.len() > 0 {
+            println!("hello from node {id}, {:?}", node.raft.msgs);
+        }
+
         if !node.has_ready() {
-            // println!("node {id} not ready");
             continue;
         }
         
@@ -309,11 +316,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         for msg in rd.take_messages() {
-            // println!("hello?");
+            println!("hello? {:?}", peer_addresses);
             if let Some(addr) = peer_addresses.get(&msg.to) {
-                // if msg.msg_type() != MessageType::MsgHeartbeat {
-                //     println!("sending message to peer {}, {:?}", addr, msg.msg_type());
-                // }
+                if msg.msg_type() != MessageType::MsgHeartbeat {
+                    println!("sending message to peer {}, {:?}", addr, msg.msg_type());
+                }
                 if let Ok(mut client) =
                     RaftTransportClient::connect(format!("http://{}", addr)).await
                 {
@@ -326,7 +333,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         MetadataValue::try_from(listen.to_string()).unwrap(),
                     );
                     let result = client.send_message(req).await;
-                    // println!("{:?}", result.err());
+                    if msg.msg_type() != MessageType::MsgHeartbeat {
+                        println!("hello? {:?}", result.err());
+                    }
+                } else {
+                    eprintln!("cant connect to {}", addr);
+                }
+            }
+        }
+
+        for msg in rd.take_persisted_messages() {
+            println!("hello? {:?}", peer_addresses);
+            if let Some(addr) = peer_addresses.get(&msg.to) {
+                if msg.msg_type() != MessageType::MsgHeartbeat {
+                    println!("sending message to peer {}, {:?}", addr, msg.msg_type());
+                }
+                if let Ok(mut client) =
+                    RaftTransportClient::connect(format!("http://{}", addr)).await
+                {
+                    let mut data = Vec::new();
+                    msg.encode(&mut data).unwrap();
+                    let raft_msg = transport::raftio::RaftMessage { data };
+                    let mut req = Request::new(raft_msg);
+                    req.metadata_mut().insert(
+                        "x-raft-from",
+                        MetadataValue::try_from(listen.to_string()).unwrap(),
+                    );
+                    let result = client.send_message(req).await;
+                    if msg.msg_type() != MessageType::MsgHeartbeat {
+                        println!("hello? {:?}", result.err());
+                    }
                 } else {
                     eprintln!("cant connect to {}", addr);
                 }
@@ -338,15 +374,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut light_rd = node.advance(rd);
 
         for msg in light_rd.take_messages() {
-            // println!("hi?");
+            println!("hi? {:?}", peer_addresses);
             if let Some(addr) = peer_addresses.get(&msg.to) {
-                // if msg.msg_type() != MessageType::MsgHeartbeat {
-                //     println!(
-                //         "sending light message to peer {}, {:?}",
-                //         addr,
-                //         msg.msg_type()
-                //     );
-                // }
+                if msg.msg_type() != MessageType::MsgHeartbeat {
+                    println!(
+                        "sending light message to peer {}, {:?}",
+                        addr,
+                        msg.msg_type()
+                    );
+                }
                 if let Ok(mut client) =
                     RaftTransportClient::connect(format!("http://{}", addr)).await
                 {
@@ -359,7 +395,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         MetadataValue::try_from(listen.to_string()).unwrap(),
                     );
                     let result = client.send_message(req).await;
-                    // println!("{:?}", result.err());
+                    if msg.msg_type() != MessageType::MsgHeartbeat {
+                        println!("hi {:?}", result.err());
+                    }
                 }
             }
         }
