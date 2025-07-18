@@ -1,5 +1,6 @@
 use prost::Message;
 use raft::eraftpb::Message as RaftProtoMessage;
+use raft::{storage::MemStorage, RawNode, Storage};
 use tonic::{Request, Response, Status};
 use std::net::SocketAddr;
 
@@ -14,25 +15,26 @@ use raftio::{JoinRequest, JoinResponse, LeaveRequest, LeaveResponse, RaftMessage
 use crate::events::Event;
 use crate::membership::MembershipChange;
 use tokio::sync::{mpsc::Sender, RwLock};
-use std::sync::Arc;
 use std::collections::HashMap;
-
-#[derive(Default, Clone)]
-pub struct ClusterInfo {
-    pub voters: Vec<u64>,
-    pub learners: Vec<u64>,
-    pub peer_addresses: HashMap<u64, String>,
-    pub snapshot: Vec<u8>,
-}
+use std::sync::Arc;
 
 pub struct RaftService {
     pub tx: Sender<Event>,
-    pub cluster_info: Arc<RwLock<ClusterInfo>>, 
+    pub node: Arc<RwLock<RawNode<MemStorage>>>,
+    pub peer_addresses: Arc<RwLock<HashMap<u64, String>>>,
 }
 
 impl RaftService {
-    pub fn new(tx: Sender<Event>, cluster_info: Arc<RwLock<ClusterInfo>>) -> Self {
-        Self { tx, cluster_info }
+    pub fn new(
+        tx: Sender<Event>,
+        node: Arc<RwLock<RawNode<MemStorage>>>,
+        peer_addresses: Arc<RwLock<HashMap<u64, String>>>,
+    ) -> Self {
+        Self {
+            tx,
+            node,
+            peer_addresses,
+        }
     }
 }
 
@@ -75,12 +77,41 @@ impl RaftTransport for RaftService {
             eprintln!("Failed to forward join request: {e}");
         }
 
-        let info = self.cluster_info.read().await;
+        let mut node = self.node.write().await;
+        let voters = node
+            .raft
+            .prs()
+            .conf()
+            .voters()
+            .ids()
+            .iter()
+            .collect();
+        let learners = node
+            .raft
+            .prs()
+            .conf()
+            .learners()
+            .iter()
+            .cloned()
+            .collect();
+        let applied = node.raft.raft_log.applied;
+        let node_id = node.raft.id;
+        let mut snapshot = Vec::new();
+        if let Ok(mut snap) = node.mut_store().snapshot(applied, node_id) {
+            if let Ok(term) = node.mut_store().term(applied) {
+                snap.mut_metadata().term = term;
+                snapshot = snap.encode_to_vec();
+            }
+        }
+        drop(node);
+
+        let peer_addresses = self.peer_addresses.read().await.clone();
+
         Ok(Response::new(JoinResponse {
-            voters: info.voters.clone(),
-            learners: info.learners.clone(),
-            peer_addresses: info.peer_addresses.clone(),
-            snapshot: info.snapshot.clone(),
+            voters,
+            learners,
+            peer_addresses,
+            snapshot,
         }))
     }
 
