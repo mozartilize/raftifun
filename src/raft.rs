@@ -26,27 +26,32 @@ pub async fn new_node(
     let storage: MemStorage;
 
     if let Some(join) = join_addr {
-        let mut client = RaftTransportClient::connect(format!("http://{}", join)).await?;
+        let mut client =
+            RaftTransportClient::connect(format!("http://{}", join)).await?;
         let req = transport::raftio::JoinRequest {
             id,
             address: listen.to_string(),
         };
-        if let Ok(resp) = client.join(req).await {
-            let resp = resp.into_inner();
-            let mut peer_addresses_shared_wl = peer_addresses_shared.write().await;
-            for (id, addr) in resp.peer_addresses {
-                peer_addresses_shared_wl.insert(id, addr);
+
+        let resp = client.join(req).await?;
+        let resp = resp.into_inner();
+
+        if resp.peer_addresses.contains_key(&id) {
+            anyhow::bail!("node id {} already exists", id);
+        }
+
+        let mut peer_addresses_shared_wl = peer_addresses_shared.write().await;
+        for (id, addr) in resp.peer_addresses {
+            peer_addresses_shared_wl.insert(id, addr);
+        }
+        peer_addresses_shared_wl.insert(id, listen.to_string());
+
+        storage = MemStorage::new_with_conf_state((resp.voters, resp.learners));
+        if !resp.snapshot.is_empty() {
+            if let Ok(snapshot) = raft::eraftpb::Snapshot::decode(&*resp.snapshot) {
+                println!("apply_snapshot {:?}", snapshot);
+                storage.wl().apply_snapshot(snapshot)?;
             }
-            peer_addresses_shared_wl.insert(id, listen.to_string());
-            storage = MemStorage::new_with_conf_state((resp.voters, resp.learners));
-            if !resp.snapshot.is_empty() {
-                if let Ok(snapshot) = raft::eraftpb::Snapshot::decode(&*resp.snapshot) {
-                    println!("apply_snapshot {:?}", snapshot);
-                    storage.wl().apply_snapshot(snapshot)?;
-                }
-            }
-        } else {
-            storage = MemStorage::new_with_conf_state((vec![], vec![]));
         }
     } else {
         storage = MemStorage::new_with_conf_state((vec![id], vec![]));
