@@ -1,9 +1,0 @@
-[workspace]
-resolver = "2"
-
-members = [
-    "scylla-cdc",
-    "scylla-cdc-printer",
-    "scylla-cdc-replicator",
-    "scylla-cdc-test-utils",
-]
