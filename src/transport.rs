@@ -12,8 +12,7 @@ use raftio::raft_transport_server::RaftTransport;
 pub use raftio::raft_transport_server::RaftTransportServer;
 use raftio::{JoinRequest, JoinResponse, LeaveRequest, LeaveResponse, RaftMessage};
 
-use crate::events::Event;
-use crate::membership::MembershipChange;
+use crate::events::{Event, MembershipChange};
 use tokio::sync::{mpsc::Sender, RwLock};
 use std::collections::HashMap;
 use std::sync::Arc;
