@@ -1,21 +1,23 @@
 use prost::Message;
 use raft::eraftpb::Message as RaftProtoMessage;
 use raft::{storage::MemStorage, RawNode, Storage};
-use tonic::{Request, Response, Status};
 use std::net::SocketAddr;
+use tonic::{Request, Response, Status};
 
 pub mod raftio {
     tonic::include_proto!("raftio");
 }
 
+use raftio::raft_transport_client::RaftTransportClient;
 use raftio::raft_transport_server::RaftTransport;
 pub use raftio::raft_transport_server::RaftTransportServer;
 use raftio::{JoinRequest, JoinResponse, LeaveRequest, LeaveResponse, RaftMessage};
 
 use crate::events::{Event, MembershipChange};
-use tokio::sync::{mpsc::Sender, RwLock};
+use raft::StateRole;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::{mpsc::Sender, RwLock};
 
 pub struct RaftService {
     pub tx: Sender<Event>,
@@ -65,34 +67,46 @@ impl RaftTransport for RaftService {
     async fn join(&self, request: Request<JoinRequest>) -> Result<Response<JoinResponse>, Status> {
         let jr = request.into_inner();
         println!("Join request for node {}", jr.id);
+
+        {
+            let node = self.node.read().await;
+            if node.raft.state != StateRole::Leader {
+                let leader_id = node.raft.leader_id;
+                drop(node);
+                if leader_id != 0 {
+                    if let Some(addr) = self.peer_addresses.read().await.get(&leader_id).cloned() {
+                        println!(
+                            "Forwarding join request to leader {} at {}",
+                            leader_id, addr
+                        );
+                        let mut client = RaftTransportClient::connect(format!("http://{}", addr))
+                            .await
+                            .map_err(|e| {
+                                Status::failed_precondition(format!("forward join: {e}"))
+                            })?;
+                        return client.join(Request::new(jr)).await;
+                    }
+                }
+                return Err(Status::failed_precondition(
+                    "node is not leader and leader unknown",
+                ));
+            }
+        }
+
         if let Err(e) = self
             .tx
             .send(Event::Membership(MembershipChange::AddNode {
                 id: jr.id,
-                address: jr.address,
+                address: jr.address.clone(),
             }))
             .await
         {
-            eprintln!("Failed to forward join request: {e}");
+            return Err(Status::internal(format!("forward join request: {e}")));
         }
 
         let mut node = self.node.write().await;
-        let voters = node
-            .raft
-            .prs()
-            .conf()
-            .voters()
-            .ids()
-            .iter()
-            .collect();
-        let learners = node
-            .raft
-            .prs()
-            .conf()
-            .learners()
-            .iter()
-            .cloned()
-            .collect();
+        let voters = node.raft.prs().conf().voters().ids().iter().collect();
+        let learners = node.raft.prs().conf().learners().iter().cloned().collect();
         let applied = node.raft.raft_log.applied;
         let node_id = node.raft.id;
         let mut snapshot = Vec::new();
