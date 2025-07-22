@@ -26,8 +26,7 @@ pub async fn new_node(
     let storage: MemStorage;
 
     if let Some(join) = join_addr {
-        let mut client =
-            RaftTransportClient::connect(format!("http://{}", join)).await?;
+        let mut client = RaftTransportClient::connect(format!("http://{}", join)).await?;
         let req = transport::raftio::JoinRequest {
             id,
             address: listen.to_string(),

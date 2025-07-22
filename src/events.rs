@@ -1,8 +1,8 @@
 use raft::eraftpb::Message as RaftMessage;
-use std::net::SocketAddr;
 use raft::prelude::{ConfChangeSingle, ConfChangeType, ConfChangeV2};
 use raft::{storage::MemStorage, RawNode};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 

@@ -8,8 +8,8 @@ pub struct Command {
 }
 
 pub mod command {
-    use prost::alloc::vec::Vec;
     use prost::alloc::string::String;
+    use prost::alloc::vec::Vec;
     use prost::Oneof;
 
     #[derive(Clone, PartialEq, Oneof)]
@@ -50,7 +50,10 @@ impl CoordinatorState {
 
         for (i, stream_id) in self.all_stream_ids.iter().enumerate() {
             let target = consumers[i % num_consumers];
-            assignments.entry(target.clone()).or_default().push(stream_id.clone());
+            assignments
+                .entry(target.clone())
+                .or_default()
+                .push(stream_id.clone());
         }
 
         self.assignments = assignments;
