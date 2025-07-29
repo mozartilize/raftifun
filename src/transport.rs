@@ -134,6 +134,32 @@ impl RaftTransport for RaftService {
     ) -> Result<Response<LeaveResponse>, Status> {
         let lr = request.into_inner();
         println!("Leave request for node {}", lr.id);
+
+        {
+            let node = self.node.read().await;
+            if node.raft.state != StateRole::Leader {
+                let leader_id = node.raft.leader_id;
+                drop(node);
+                if leader_id != 0 {
+                    if let Some(addr) = self.peer_addresses.read().await.get(&leader_id).cloned() {
+                        println!(
+                            "Forwarding leave request to leader {} at {}",
+                            leader_id, addr
+                        );
+                        let mut client = RaftTransportClient::connect(format!("http://{}", addr))
+                            .await
+                            .map_err(|e| {
+                                Status::failed_precondition(format!("forward leave: {e}"))
+                            })?;
+                        return client.leave(Request::new(lr)).await;
+                    }
+                }
+                return Err(Status::failed_precondition(
+                    "node is not leader and leader unknown",
+                ));
+            }
+        }
+        
         if let Err(e) = self
             .tx
             .send(Event::Membership(MembershipChange::RemoveNode(lr.id)))
