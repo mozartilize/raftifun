@@ -5,7 +5,7 @@ use crate::{
     transport::{self, raftio::raft_transport_client::RaftTransportClient},
 };
 use prost::Message as _;
-use raft::eraftpb::Entry;
+use raft::{eraftpb::Entry, prelude::ConfChangeType};
 use raft::{prelude::ConfChangeV2, storage::MemStorage, Config, RawNode};
 use slog::Logger;
 use tokio::sync::RwLock;
@@ -35,10 +35,6 @@ pub async fn new_node(
         let resp = client.join(req).await?;
         let resp = resp.into_inner();
 
-        if resp.peer_addresses.contains_key(&id) {
-            anyhow::bail!("node id {} already exists", id);
-        }
-
         let mut peer_addresses_shared_wl = peer_addresses_shared.write().await;
         for (id, addr) in resp.peer_addresses {
             peer_addresses_shared_wl.insert(id, addr);
@@ -60,13 +56,15 @@ pub async fn new_node(
     Ok(node)
 }
 
-pub fn handle_committed_entries(
+pub async fn handle_committed_entries(
     node: &mut RawNode<MemStorage>,
     state: &mut CoordinatorState,
     entries: Vec<Entry>,
-) {
+    peer_addresses: Arc<RwLock<HashMap<u64, String>>>,
+) -> bool {
     use raft::eraftpb::EntryType;
-    // println!("process {} commited entries", entries.len());
+
+    let mut will_exit = false;
     for entry in entries {
         if entry.data.is_empty() {
             continue;
@@ -77,10 +75,29 @@ pub fn handle_committed_entries(
                     println!("Applying conf change: {:?}", cc);
                     if let Ok(cs) = node.apply_conf_change(&cc) {
                         node.mut_store().wl().set_conf_state(cs);
+                        for change in cc.get_changes() {
+                            match change.get_change_type() {
+                                ConfChangeType::RemoveNode => {
+                                    let removed_id = change.get_node_id();
+                                    println!("remove node {} == {removed_id}", node.raft.id);
+                                    if node.raft.id == removed_id {
+                                        println!("exiting...");
+                                        will_exit = true;
+                                    }
+                                    // else {
+                                    //     let mut map = peer_addresses.write().await;
+                                    //     map.remove(&removed_id);
+                                    // }
+                                },
+                                // ConfChangeType::AddLearnerNode => {
+                                //     let node_id = change.get_node_id();
+                                //     let mut map = peer_addresses.write().await;
+                                //     map.insert(&node_id, ...);
+                                // },
+                                _ => {}
+                            }
+                        }
                     }
-                }
-                for (node_id, prs) in node.raft.prs().iter() {
-                    println!("post apply {node_id} {:?}", prs);
                 }
             }
             _ => {
@@ -91,4 +108,5 @@ pub fn handle_committed_entries(
             }
         }
     }
+    will_exit
 }
