@@ -68,6 +68,11 @@ impl RaftTransport for RaftService {
         let jr = request.into_inner();
         println!("Join request for node {}", jr.id);
 
+        let peer_addresses = self.peer_addresses.read().await.clone();
+        if peer_addresses.contains_key(&jr.id) {
+            return Err(Status::already_exists(format!("node id {} already exits", jr.id)));
+        }
+
         {
             let node = self.node.read().await;
             if node.raft.state != StateRole::Leader {

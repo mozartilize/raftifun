@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .use_file_location()
         .build()
         .fuse();
-    let drain = slog::LevelFilter::new(drain, slog::Level::Debug).fuse();
+    let drain = slog::LevelFilter::new(drain, slog::Level::Info).fuse();
     let drain = slog_async::Async::new(drain).build().fuse();
     let logger = Logger::root(drain, slog::o!());
 
@@ -67,10 +67,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let peer_addresses_shared: Arc<RwLock<HashMap<u64, String>>> =
                 Arc::new(RwLock::new(HashMap::<u64, String>::new()));
-            {
-                let mut map = peer_addresses_shared.write().await;
-                map.insert(id, listen.to_string());
-            }
 
             // Bind the listener first so we know the port is reserved
             let listener = TcpListener::bind(listen).await.expect("bind failed");
@@ -106,7 +102,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut ticker = interval(Duration::from_millis(100));
 
+            let mut will_exit = false;
             loop {
+                if will_exit {
+                    break;
+                }
                 let next = tokio::select! {
                     _ = ticker.tick() => Next::Tick,
                     evt = rx.recv() => {
@@ -134,9 +134,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 {
                     let mut raft_node = node.write().await;
 
-                    if raft_node.raft.state != StateRole::Leader && raft_node.raft.msgs.len() > 0 {
-                        println!("hello from node {id}, {:?}", raft_node.raft.msgs);
-                    }
+                    // if raft_node.raft.state != StateRole::Leader && raft_node.raft.msgs.len() > 0 {
+                    //     println!("hello from node {id}, {:?}", raft_node.raft.msgs);
+                    // }
 
                     if !raft_node.has_ready() {
                         continue;
@@ -162,17 +162,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     messages.extend(rd.take_messages());
                     persisted_messages.extend(rd.take_persisted_messages());
 
-                    handle_committed_entries(&mut raft_node, &mut state, rd.take_committed_entries());
+                    let will_exit1 = handle_committed_entries(
+                        &mut raft_node,
+                        &mut state,
+                        rd.take_committed_entries(),
+                        peer_addresses_shared.clone(),
+                    )
+                    .await;
 
                     let mut light_rd = raft_node.advance(rd);
 
                     light_messages.extend(light_rd.take_messages());
 
-                    handle_committed_entries(
+                    let will_exit2 = handle_committed_entries(
                         &mut raft_node,
                         &mut state,
                         light_rd.take_committed_entries(),
-                    );
+                        peer_addresses_shared.clone(),
+                    )
+                    .await;
+
+                    will_exit = will_exit1 | will_exit2;
 
                     raft_node.advance_apply();
                 }
@@ -182,7 +192,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let map = peer_addresses_shared.read().await;
                         map.get(&msg.to).cloned()
                     } {
-                        if msg.msg_type() != MessageType::MsgHeartbeat {
+                        if ![MessageType::MsgHeartbeat, MessageType::MsgHeartbeatResponse]
+                            .contains(&msg.msg_type())
+                        {
                             println!("sending message to peer {}, {:?}", addr, msg.msg_type());
                         }
                         if let Ok(mut client) =
@@ -197,7 +209,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 MetadataValue::try_from(listen.to_string()).unwrap(),
                             );
                             let result = client.send_message(req).await;
-                            if msg.msg_type() != MessageType::MsgHeartbeat {
+                            if ![MessageType::MsgHeartbeat, MessageType::MsgHeartbeatResponse]
+                                .contains(&msg.msg_type())
+                            {
                                 println!("hello? {:?}", result.err());
                             }
                         } else {
@@ -211,7 +225,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let map = peer_addresses_shared.read().await;
                         map.get(&msg.to).cloned()
                     } {
-                        if msg.msg_type() != MessageType::MsgHeartbeat {
+                        if ![MessageType::MsgHeartbeat, MessageType::MsgHeartbeatResponse]
+                            .contains(&msg.msg_type())
+                        {
                             println!("sending message to peer {}, {:?}", addr, msg.msg_type());
                         }
                         if let Ok(mut client) =
@@ -226,7 +242,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 MetadataValue::try_from(listen.to_string()).unwrap(),
                             );
                             let result = client.send_message(req).await;
-                            if msg.msg_type() != MessageType::MsgHeartbeat {
+                            if ![MessageType::MsgHeartbeat, MessageType::MsgHeartbeatResponse]
+                                .contains(&msg.msg_type())
+                            {
                                 println!("hello? {:?}", result.err());
                             }
                         } else {
@@ -265,8 +283,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-            };
-        },
+            }
+        }
         (id, None, Some(join), true) => {
             let mut client = RaftTransportClient::connect(format!("http://{}", join)).await?;
             let req = transport::raftio::LeaveRequest { id };

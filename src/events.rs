@@ -27,6 +27,7 @@ pub async fn handle_event(
     match evt {
         Event::Membership(MembershipChange::AddNode { id, address }) => {
             {
+                // FIXME: this shouldn't be here since it just proposes to add new node, not official
                 let mut map = peer_addresses.write().await;
                 map.insert(id, address);
             }
@@ -43,10 +44,6 @@ pub async fn handle_event(
             }
         }
         Event::Membership(MembershipChange::RemoveNode(id)) => {
-            {
-                let mut map = peer_addresses.write().await;
-                map.remove(&id);
-            }
             let mut n = node.write().await;
             let cc = ConfChangeV2 {
                 changes: vec![ConfChangeSingle {
